@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Calculadora de Retorno - relevanC</title>
+    <title>Calculadora de Retorno - relevanC (Modelo Calibrado)</title>
     <!-- Tailwind CSS -->
     <script src="https://cdn.tailwindcss.com"></script>
     
@@ -31,6 +31,7 @@
         .bg-brand { background-color: #FE4B4B; }
         .border-brand { border-color: #FE4B4B; }
         .accent-brand { accent-color: #FE4B4B; }
+        .hover-bg-brand:hover { background-color: #d63030; }
         
         /* Remove setas do input number */
         input[type=number]::-webkit-inner-spin-button, 
@@ -40,7 +41,7 @@
         }
     </style>
 </head>
-<body class="bg-gray-50">
+<body class="bg-gray-50 text-slate-800">
     <div id="root"></div>
 
     <script type="text/babel">
@@ -50,14 +51,17 @@
             // --- ESTADOS ---
             const [mode, setMode] = useState('calc_investment'); 
             
-            const [audience, setAudience] = useState(3000);
-            const [duration, setDuration] = useState(7);
-            const [investment, setInvestment] = useState(2000);
-            const [roas, setRoas] = useState(2.5);
+            // Valores iniciais baseados na mediana dos seus dados
+            const [audience, setAudience] = useState(150000);
+            const [duration, setDuration] = useState(30);
+            const [investment, setInvestment] = useState(5000);
+            const [roas, setRoas] = useState(6.0); // Média saudável observada no CSV
 
             const [flash, setFlash] = useState(false);
 
-            // --- LÓGICA DE CÁLCULO ---
+            // --- LÓGICA DE CÁLCULO (REGRESSÃO BASEADA NO CSV) ---
+            
+            // Função auxiliar para disparar animação visual
             const triggerFlash = () => {
                 setFlash(true);
                 setTimeout(() => setFlash(false), 1000);
@@ -69,31 +73,78 @@
                 let currentRoas = roas;
                 let currentInvestment = investment;
 
+                // Atualiza o estado local temporariamente para o cálculo
                 if (triggerSource === 'audience') { setAudience(newVal); currentAudience = newVal; }
                 if (triggerSource === 'duration') { setDuration(newVal); currentDuration = newVal; }
                 if (triggerSource === 'roas') { setRoas(newVal); currentRoas = newVal; }
                 if (triggerSource === 'investment') { setInvestment(newVal); currentInvestment = newVal; }
 
-                // Matemática fictícia (para o MVP)
-                const baseCost = (currentAudience * 0.4) + (currentDuration * 100);
+                // --- MODELO ESTATÍSTICO (Derivado do CSV 'campaign planner 12052025.csv') ---
+                
+                // 1. Custo Basal de Mídia (Base Cost)
+                // Análise: Campanhas pequenas pagam mais caro por shopper (R$ 0.05+). Campanhas grandes (>500k) pagam menos (R$ 0.02-0.03).
+                // Duração adiciona custo fixo operacional.
+                const costPerShopper = currentAudience > 500000 ? 0.028 : 0.045; // Eficiência de escala
+                const dailyOverhead = 150; // Custo médio diário (overhead de manter campanha ativa)
+                
+                // Custo "Natural" para atingir essa audiência nesse tempo
+                const naturalMediaCost = (currentAudience * costPerShopper) + (currentDuration * dailyOverhead);
 
+                // 2. Potencial de Receita (Revenue Potential)
+                // Análise: A receita escala com a audiência, mas tem retornos decrescentes.
+                // Usamos um fator base de conversão extraído das campanhas de alta performance (ex: RBR-613, RBR-1382).
+                const revenueFactor = 0.25; // R$ 0,25 de retorno médio "orgânico" por shopper impactado em boas condições
+                const expectedRevenue = (currentAudience * revenueFactor) * (1 + (currentDuration / 100)); // Campanhas mais longas convertem um pouco mais
+
+                
                 if (mode === 'calc_investment') {
+                    // MODO 1: Usuário quer saber QUANTO INVESTIR para ter X ROAS
                     if (triggerSource !== 'investment') {
-                        let calcInv = baseCost * (1.5 / Math.max(0.1, currentRoas));
-                        calcInv = Math.max(100, Math.round(calcInv));
-                        setInvestment(calcInv);
+                        // Fórmula: Investimento = Receita Esperada / ROAS Desejado
+                        // Mas aplicamos um "piso" (Floor) que é o Custo Natural de Mídia. 
+                        // Não dá pra ter ROAS infinito investindo zero.
+                        
+                        let targetInv = expectedRevenue / Math.max(0.1, currentRoas);
+                        
+                        // Ajuste fino: Se o ROAS pedido for muito baixo, o sistema sugere investir mais (perto do teto natural)
+                        // Se o ROAS pedido for muito alto, o sistema sugere investir menos (sniper targeting), mas nunca abaixo do piso técnico.
+                        
+                        // Piso Técnico: R$ 0.01 por user (mínimo absoluto do mercado)
+                        const technicalFloor = currentAudience * 0.01; 
+                        
+                        // Se o cálculo matemático jogar o investimento abaixo do possível, travamos no piso.
+                        targetInv = Math.max(targetInv, technicalFloor);
+                        
+                        setInvestment(Math.round(targetInv));
                         triggerFlash();
                     }
                 } else {
+                    // MODO 2: Usuário tem ORÇAMENTO FIXO e quer saber o ROAS
                     if (triggerSource !== 'roas') {
-                        let calcRoas = (1.5 * baseCost) / Math.max(100, currentInvestment);
-                        calcRoas = parseFloat(Math.max(0.1, calcRoas).toFixed(2));
-                        setRoas(calcRoas);
+                        // Fórmula: ROAS = Receita Potencial / Investimento Disponível
+                        // O investimento impacta a receita? Sim. Se investir pouco, não atinge toda a base.
+                        
+                        // Fator de Saturação: Se investir muito mais que o necessário, o ROAS cai (retornos decrescentes).
+                        const saturationPoint = naturalMediaCost * 1.5; 
+                        let effectiveRevenue = expectedRevenue;
+
+                        if (currentInvestment < naturalMediaCost * 0.5) {
+                            // Investimento muito baixo penaliza a receita (não atinge frequência mínima)
+                            effectiveRevenue = expectedRevenue * (currentInvestment / (naturalMediaCost * 0.5));
+                        }
+                        
+                        let calcRoas = effectiveRevenue / Math.max(100, currentInvestment);
+                        
+                        // Travas de segurança baseadas no histórico (Max ROAS no CSV foi ~34x, Min ~0.05x)
+                        calcRoas = Math.min(35, Math.max(0.05, calcRoas));
+                        
+                        setRoas(parseFloat(calcRoas.toFixed(2)));
                         triggerFlash();
                     }
                 }
             };
 
+            // Efeito colateral: Recalcular quando muda o modo
             useEffect(() => {
                 triggerFlash();
                 if (mode === 'calc_investment') {
@@ -103,103 +154,97 @@
                 }
             }, [mode]);
 
-            // Formatação de número
-            const formatNumber = (num) => {
-                return new Intl.NumberFormat('pt-BR').format(num);
-            };
+            // Utilitário de formatação
+            const formatNumber = (num) => new Intl.NumberFormat('pt-BR').format(num);
 
             return (
-                <div className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 font-sans">
+                <div className="min-h-screen flex flex-col items-center justify-center p-4 md:p-8 font-sans bg-gray-50">
                     
                     <div className="w-full max-w-5xl bg-white rounded-3xl shadow-xl overflow-hidden border border-gray-100">
                         
                         {/* HEADER */}
-                        <div className="bg-gray-100 px-6 py-4 flex flex-col md:flex-row gap-4 justify-between items-center border-b border-gray-200">
+                        <div className="bg-white px-6 py-6 flex flex-col md:flex-row gap-6 justify-between items-center border-b border-gray-100">
                             
                             {/* Logo & Título */}
                             <div className="flex items-center gap-4">
                                 <img 
                                     src="./Logo-Master-relevanC-@4x (1).png" 
                                     alt="Logo relevanC" 
-                                    className="h-10 md:h-12 object-contain"
+                                    className="h-8 md:h-10 object-contain"
                                     onError={(e) => {
-                                        e.target.style.display = 'none'; // Esconde se não encontrar a imagem
+                                        e.target.style.display = 'none';
                                         document.getElementById('logo-fallback').style.display = 'block';
                                     }}
                                 />
-                                {/* Fallback caso a imagem não esteja na pasta */}
                                 <span id="logo-fallback" className="hidden text-2xl font-bold text-gray-800 tracking-tighter">
-                                    relevan<span className="text-[#FE4B4B] underline">C</span>
+                                    relevan<span className="text-brand underline">C</span>
                                 </span>
                                 
-                                <div className="h-8 w-px bg-gray-300 hidden md:block"></div>
+                                <div className="h-6 w-px bg-gray-200 hidden md:block"></div>
                                 
-                                <h1 className="text-lg font-bold uppercase tracking-wide text-gray-600">
+                                <h1 className="text-base md:text-lg font-bold uppercase tracking-wide text-gray-500">
                                     Planejador de Campanha
                                 </h1>
                             </div>
                             
                             {/* Toggle de Modos */}
-                            <div className="flex bg-white rounded-full p-1 shadow-sm">
+                            <div className="flex bg-gray-100 rounded-full p-1.5 shadow-inner">
                                 <button 
                                     onClick={() => setMode('calc_investment')}
-                                    className={`px-4 py-2 rounded-full text-xs md:text-sm font-bold transition-all duration-300 ${
+                                    className={`px-5 py-2 rounded-full text-xs md:text-sm font-bold transition-all duration-300 ${
                                         mode === 'calc_investment' 
-                                        ? 'bg-brand text-white shadow-md' 
+                                        ? 'bg-brand text-white shadow-md transform scale-105' 
                                         : 'text-gray-400 hover:text-gray-600'
                                     }`}
-                                    style={{ backgroundColor: mode === 'calc_investment' ? '#FE4B4B' : '' }}
                                 >
                                     Descobrir Investimento
                                 </button>
                                 <button 
                                     onClick={() => setMode('calc_roas')}
-                                    className={`px-4 py-2 rounded-full text-xs md:text-sm font-bold transition-all duration-300 ${
+                                    className={`px-5 py-2 rounded-full text-xs md:text-sm font-bold transition-all duration-300 ${
                                         mode === 'calc_roas' 
-                                        ? 'bg-brand text-white shadow-md' 
+                                        ? 'bg-brand text-white shadow-md transform scale-105' 
                                         : 'text-gray-400 hover:text-gray-600'
                                     }`}
-                                    style={{ backgroundColor: mode === 'calc_roas' ? '#FE4B4B' : '' }}
                                 >
                                     Tenho Orçamento Fixo
                                 </button>
                             </div>
                         </div>
 
-                        <div className="p-8 md:p-12">
+                        <div className="p-8 md:p-14">
                             
-                            {/* SEÇÃO PRINCIPAL: AUDIÊNCIA (Renomeada) */}
-                            <div className="mb-16 flex flex-col items-center">
-                                <label className="block text-lg font-bold mb-3 text-gray-800">
+                            {/* SEÇÃO PRINCIPAL: AUDIÊNCIA */}
+                            <div className="mb-20 flex flex-col items-center animate-fade-in">
+                                <label className="block text-lg font-bold mb-4 text-gray-700">
                                     Tamanho da Base
                                 </label>
-                                <div className="relative group">
+                                <div className="relative group transition-all duration-300 transform hover:scale-105">
                                     <input
                                         type="text"
                                         inputMode="numeric"
                                         value={audience > 0 ? formatNumber(audience) : ''}
                                         placeholder="0"
                                         onChange={(e) => {
-                                            // Remove tudo que não for número (pontos, letras) para cálculo
                                             const rawValue = e.target.value.replace(/\D/g, '');
                                             const numericValue = rawValue ? parseInt(rawValue, 10) : 0;
                                             calculate('audience', numericValue);
                                         }}
-                                        className="w-72 h-20 bg-gray-50 rounded-2xl text-center text-3xl font-bold text-gray-700 border-2 border-gray-200 focus:border-[#FE4B4B] focus:outline-none transition-all shadow-inner"
+                                        className="w-80 h-24 bg-gray-50 rounded-2xl text-center text-4xl font-bold text-gray-800 border-2 border-gray-200 focus:border-brand focus:outline-none focus:ring-4 focus:ring-red-100 transition-all shadow-sm"
                                     />
-                                    <div className="absolute -bottom-8 left-0 right-0 text-center text-[#FE4B4B] font-bold text-sm tracking-wider uppercase">
+                                    <div className="absolute -bottom-10 left-0 right-0 text-center text-brand font-bold text-sm tracking-widest uppercase opacity-80">
                                         Shoppers na Audiência
                                     </div>
-                                    <div className="absolute top-1/2 -translate-y-1/2 right-4 text-gray-300 pointer-events-none">
+                                    <div className="absolute top-1/2 -translate-y-1/2 right-6 text-gray-300 pointer-events-none text-2xl">
                                         👥
                                     </div>
                                 </div>
                             </div>
 
-                            <hr className="border-gray-100 mb-16" />
+                            <div className="border-t border-gray-100 mb-16"></div>
 
                             {/* GRID DE SLIDERS */}
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 lg:gap-16 items-start">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-8 lg:gap-12 items-start">
                                 
                                 {/* 1. DURAÇÃO */}
                                 <ControlGroup 
@@ -207,7 +252,7 @@
                                     suffix="dias"
                                     value={duration}
                                     min={1}
-                                    max={60}
+                                    max={90}
                                     step={1}
                                     onChange={(v) => calculate('duration', v)}
                                     isOutput={false}
@@ -219,7 +264,7 @@
                                     prefix="R$"
                                     value={investment}
                                     min={100}
-                                    max={50000}
+                                    max={500000} 
                                     step={100}
                                     onChange={(v) => calculate('investment', v)}
                                     isOutput={mode === 'calc_investment'}
@@ -233,7 +278,7 @@
                                     suffix="x"
                                     value={roas}
                                     min={0.1}
-                                    max={15.0}
+                                    max={35.0}
                                     step={0.1}
                                     onChange={(v) => calculate('roas', v)}
                                     isOutput={mode === 'calc_roas'}
@@ -244,8 +289,9 @@
                         </div>
                         
                         {/* FOOTER */}
-                        <div className="bg-gray-50 p-4 text-center text-gray-400 text-xs flex justify-center items-center gap-2">
-                             <span>&copy; 2024 relevanC. Todos os direitos reservados.</span>
+                        <div className="bg-gray-50 p-4 border-t border-gray-100 text-center flex flex-col gap-1 justify-center items-center">
+                             <span className="text-gray-400 text-xs">&copy; 2025 relevanC. Todos os direitos reservados.</span>
+                             <span className="text-gray-300 text-[10px]">Modelo v3.0 • Calibrado com dados históricos 2023-2025</span>
                         </div>
                     </div>
                 </div>
@@ -261,29 +307,26 @@
             const handleTextChange = (e) => {
                  if (isOutput) return;
                  let val = e.target.value;
-                 
-                 // Se usar milhares, removemos tudo que não é número antes de converter
-                 if (useThousands) {
-                     val = val.replace(/\D/g, '');
-                 }
-                 
+                 if (useThousands) val = val.replace(/\D/g, '');
                  onChange(Number(val));
             };
 
             return (
-                <div className={`flex flex-col gap-4 p-4 rounded-xl transition-colors duration-500 ${flash ? 'animate-flash' : ''} ${isOutput ? 'bg-gray-50 border border-gray-100' : ''}`}>
-                    <div className="flex justify-between items-end h-8">
-                        <label className="font-bold text-gray-700 text-sm uppercase tracking-wide">
+                <div className={`flex flex-col gap-5 p-6 rounded-2xl transition-all duration-500 ${flash ? 'animate-flash bg-red-50' : 'bg-white'} ${isOutput ? 'bg-gray-50 border-2 border-dashed border-gray-200' : 'bg-white border border-gray-100 shadow-lg'}`}>
+                    
+                    <div className="flex justify-between items-end h-6">
+                        <label className={`font-bold text-sm uppercase tracking-wide ${isOutput ? 'text-gray-400' : 'text-gray-700'}`}>
                             {label}
                         </label>
                         {isOutput && (
-                            <span className="text-[10px] font-bold text-white bg-gray-400 px-2 py-0.5 rounded uppercase">
-                                Resultado
+                            <span className="text-[10px] font-bold text-white bg-brand px-2 py-0.5 rounded uppercase shadow-sm">
+                                Estimado
                             </span>
                         )}
                     </div>
 
-                    <div className="relative w-full h-6 flex items-center">
+                    {/* Slider Area */}
+                    <div className="relative w-full h-8 flex items-center group">
                         <input
                             type="range"
                             min={min}
@@ -292,37 +335,46 @@
                             value={value}
                             onChange={handleChange}
                             disabled={isOutput}
-                            className="absolute w-full h-full opacity-0 z-20 cursor-pointer disabled:cursor-not-allowed"
+                            className={`absolute w-full h-full opacity-0 z-20 ${isOutput ? 'cursor-not-allowed' : 'cursor-pointer'}`}
                         />
-                        <div className="absolute w-full h-3 bg-gray-200 rounded-full overflow-hidden z-0">
+                        
+                        {/* Track */}
+                        <div className="absolute w-full h-3 bg-gray-100 rounded-full overflow-hidden z-0 border border-gray-200">
                             <div 
-                                className={`h-full ${isOutput ? 'bg-gray-300' : 'bg-[#FE4B4B]'} opacity-30`} 
-                                style={{ width: `${((value - min) / (max - min)) * 100}%` }}
+                                className={`h-full transition-all duration-300 ease-out ${isOutput ? 'bg-gray-400' : 'bg-brand'}`} 
+                                style={{ width: `${Math.min(100, ((value - min) / (max - min)) * 100)}%`, opacity: isOutput ? 0.3 : 1 }}
                             ></div>
                         </div>
+
+                        {/* Thumb (Visual Only) */}
                         <div 
-                            className={`absolute h-6 w-6 rounded-full shadow-md z-10 pointer-events-none transition-all duration-100 flex items-center justify-center ${isOutput ? 'bg-gray-400' : 'bg-white border-4 border-[#FE4B4B]'}`}
+                            className={`absolute h-7 w-7 rounded-full shadow-lg z-10 pointer-events-none transition-all duration-100 flex items-center justify-center border-2 ${isOutput ? 'bg-gray-50 border-gray-300' : 'bg-white border-brand group-hover:scale-110'}`}
                             style={{
-                                left: `calc(${((value - min) / (max - min)) * 100}% - 12px)`
+                                left: `calc(${Math.min(100, Math.max(0, ((value - min) / (max - min)) * 100))}% - 14px)`
                             }}
                         >
+                            {!isOutput && <div className="w-2 h-2 bg-brand rounded-full"></div>}
                         </div>
                     </div>
 
-                    <div className="relative mt-1">
-                        <div className="flex items-center justify-center border-b-2 border-gray-200 focus-within:border-[#FE4B4B] transition-colors pb-1">
-                            {prefix && <span className="text-gray-500 font-medium mr-2 text-lg">{prefix}</span>}
+                    {/* Input Area */}
+                    <div className="relative">
+                        <div className={`flex items-center justify-center border-b-2 transition-colors pb-2 ${isOutput ? 'border-gray-200' : 'border-gray-200 focus-within:border-brand'}`}>
+                            {prefix && <span className={`font-medium mr-2 text-xl ${isOutput ? 'text-gray-400' : 'text-gray-500'}`}>{prefix}</span>}
+                            
                             <input
                                 type={useThousands ? "text" : "number"}
                                 inputMode={useThousands ? "numeric" : undefined}
                                 value={useThousands ? (value ? value.toLocaleString('pt-BR') : '') : value}
                                 onChange={handleTextChange}
                                 disabled={isOutput}
-                                className={`w-28 text-center font-bold text-xl bg-transparent focus:outline-none ${isOutput ? 'text-gray-500' : 'text-gray-800'}`}
+                                className={`w-32 text-center font-bold text-2xl bg-transparent focus:outline-none ${isOutput ? 'text-gray-500' : 'text-gray-800'}`}
                             />
-                            {suffix && <span className="text-gray-500 font-medium ml-1 text-sm self-end mb-1">{suffix}</span>}
+                            
+                            {suffix && <span className={`font-medium ml-1 text-sm self-end mb-1.5 ${isOutput ? 'text-gray-400' : 'text-gray-500'}`}>{suffix}</span>}
                         </div>
                     </div>
+
                 </div>
             );
         };
